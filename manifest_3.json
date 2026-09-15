@@ -1,0 +1,31 @@
+{
+  "name": "KORVUS Inspect",
+  "short_name": "KORVUS",
+  "description": "KORVUS intelligent field inspection platform — voice-to-report for pest and timber pest technicians.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#D6E4EF",
+  "theme_color": "#D6E4EF",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
