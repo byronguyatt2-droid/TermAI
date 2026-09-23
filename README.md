@@ -1,2 +1,0 @@
-# TermAI
-TermiteAI
