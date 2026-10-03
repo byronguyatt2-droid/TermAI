@@ -5,9 +5,10 @@
 // the same visual style as the inspection report.
 //
 // Loaded after the main <script> in index.html and relies on its globals:
-// reportData, appInitialised, currentReportId, authUser, authBusiness,
-// DRAFT_KEY, flushDraftSave, getSavedReports, getCompanyDetails, jsPDF,
-// ensureJsPDFLoaded, showToast, escapeHtml, toggleDrawer, openApp.
+// appInitialised, currentReportId, authUser, authBusiness, DRAFT_KEY,
+// flushDraftSave, getSavedReports, getCompanyDetails, formatAddress, jsPDF,
+// ensureJsPDFLoaded, PDF_COLORS, drawPdfCompanyMark, deliverPdfBlob,
+// showToast, escapeHtml, toggleDrawer.
 // ══════════════════════════════════════════════════════════════════════════
 
 // Starting prices (AUD, ex GST) used until the business sets its own. Each
@@ -83,11 +84,6 @@ function setQuoteSaveState(text) {
 }
 
 // ── REPORT SOURCES ──────────────────────────────────────────────────────────
-function joinAddress(street, suburb, state, postcode) {
-  const line2 = [suburb, [state, postcode].filter(Boolean).join(' ')].filter(Boolean).join(' ');
-  return [street, line2].filter(Boolean).join(', ');
-}
-
 function hasReportContent(rd) {
   if (!rd) return false;
   const findings = Array.isArray(rd.findings) ? rd.findings : [];
@@ -109,7 +105,7 @@ function collectQuoteSources() {
     sources.push({
       key: draft.currentReportId || 'draft',
       label: 'Current report',
-      address: joinAddress(draft.jobAddress, draft.jobSuburb, draft.jobState, draft.jobPostcode),
+      address: formatAddress(draft.jobAddress, draft.jobSuburb, draft.jobState, draft.jobPostcode),
       client: draft.jobClient || '',
       inspector: draft.jobInspector || '',
       reportData: draft.reportData || {},
@@ -124,7 +120,7 @@ function collectQuoteSources() {
       sources.push({
         key: r.id,
         label: '',
-        address: r.address || joinAddress(r.jobAddress, r.jobSuburb, r.jobState, r.jobPostcode),
+        address: r.address || formatAddress(r.jobAddress, r.jobSuburb, r.jobState, r.jobPostcode),
         client: r.client || '',
         inspector: r.inspector || '',
         reportData: r.reportData || {},
@@ -455,15 +451,6 @@ function rebuildQuoteFromReport() {
 }
 
 // ── PDF EXPORT ──────────────────────────────────────────────────────────────
-// Same palette as the inspection report PDF (_buildAndDownloadPDF in index.html).
-const QUOTE_PDF_COLORS = {
-  white: [255, 255, 255],
-  ink: [12, 18, 28], inkLight: [55, 70, 88], inkMuted: [115, 130, 148],
-  accent: [13, 148, 136], accentDark: [8, 100, 92],
-  rule: [208, 218, 228], ruleLight: [230, 237, 244], rowAlt: [245, 248, 251],
-  headerBg: [10, 15, 22], coverDark: [10, 15, 22],
-};
-
 function exportQuotePDF() {
   if (!quoteState) return;
   clearTimeout(quoteSaveTimer);
@@ -476,7 +463,11 @@ function exportQuotePDF() {
   setTimeout(() => {
     ensureJsPDFLoaded()
       .then(() => buildQuotePDF(quoteState))
-      .then(({ blob, fname }) => deliverQuotePDF(blob, fname))
+      .then(({ blob, fname }) => deliverPdfBlob(blob, fname, {
+        title: 'KORVUS Quote',
+        text: `Treatment quote — ${quoteState.address || 'Property'}`,
+        readyToast: 'Quote ready — choose where to save or send it',
+      }))
       .catch(e => {
         console.error('Quote PDF failed:', e);
         showToast((e && e.message) || 'Could not generate the PDF — check your connection and try again', 'error');
@@ -486,7 +477,7 @@ function exportQuotePDF() {
 }
 
 function buildQuotePDF(q) {
-  const C = QUOTE_PDF_COLORS;
+  const C = PDF_COLORS;
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const W = 210, M = 15, CW = W - M * 2, BOTTOM = 276;
   const fmtDate = d => new Date(d).toLocaleDateString('en-AU', { day: 'numeric', month: 'long', year: 'numeric' });
@@ -524,23 +515,7 @@ function buildQuotePDF(q) {
   doc.setFillColor(...C.coverDark); doc.rect(0, 0, W, 48, 'F');
   doc.setFillColor(...C.accent); doc.rect(0, 0, W, 3, 'F');
   doc.setFillColor(...C.accent); doc.rect(0, 0, 4, 48, 'F');
-  let logoDrawn = false;
-  if (company.logo) {
-    try {
-      const boxX = 12, boxY = 12, boxW = 24, boxH = 24, pad = 3;
-      doc.setFillColor(...C.white); doc.roundedRect(boxX, boxY, boxW, boxH, 3, 3, 'F');
-      const natW = company.logoWidth || 1, natH = company.logoHeight || 1;
-      let drawW = boxW - pad * 2, drawH = drawW * (natH / natW);
-      if (drawH > boxH - pad * 2) { drawH = boxH - pad * 2; drawW = drawH * (natW / natH); }
-      doc.addImage(company.logo, 'PNG', boxX + (boxW - drawW) / 2, boxY + (boxH - drawH) / 2, drawW, drawH, undefined, 'FAST');
-      logoDrawn = true;
-    } catch (e) { logoDrawn = false; }
-  }
-  if (!logoDrawn) {
-    doc.setFillColor(...C.accent); doc.roundedRect(14, 14, 20, 20, 3, 3, 'F');
-    doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor(...C.coverDark);
-    doc.text('K', 24, 27.5, { align: 'center' });
-  }
+  drawPdfCompanyMark(doc, company);
   doc.setFont('helvetica', 'bold'); doc.setFontSize(14); doc.setTextColor(240, 234, 224);
   doc.text(company.name || 'KORVUS', 40, 22);
   const sub = [];
@@ -720,30 +695,4 @@ function buildQuotePDF(q) {
 
   const safe = (q.address || 'Property').replace(/[^\w]+/g, '_').substring(0, 25);
   return { blob: doc.output('blob'), fname: `KORVUS_Quote_${(q.number || '').replace(/[^\w-]+/g, '')}_${safe}.pdf` };
-}
-
-// Same delivery rules as the inspection report: native share sheet inside the
-// Capacitor app (no Downloads folder there), a blob download in the browser.
-async function deliverQuotePDF(blob, fname) {
-  const isNative = window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform();
-  if (isNative) {
-    const file = new File([blob], fname, { type: 'application/pdf' });
-    if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
-      try {
-        await navigator.share({ title: 'KORVUS Quote', text: `Treatment quote — ${quoteState.address || 'Property'}`, files: [file] });
-        showToast('Quote ready — choose where to save or send it', 'success');
-      } catch (e) {
-        if (e.name !== 'AbortError') showToast('Share cancelled', 'info');
-      }
-    } else {
-      showToast('Sharing is not available on this device', 'error');
-    }
-    return;
-  }
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = fname;
-  document.body.appendChild(a); a.click();
-  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 300);
-  showToast('Quote PDF downloaded', 'success');
 }
