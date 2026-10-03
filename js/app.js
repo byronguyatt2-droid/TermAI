@@ -2393,10 +2393,26 @@ function startRecording() {
   recognition.interimResults = true;
   recognition.lang = 'en-AU';
 
+  // Safari re-delivers results it has already finalised (the same index
+  // comes back as final again, or the same phrase arrives as a fresh final
+  // result a moment later), which doubled phrases like "Wall construction
+  // Wall construction". Commit each result index once, and drop a final
+  // chunk that exactly repeats the one just committed.
+  let committedUpTo = -1;
+  let lastFinalText = '';
+  let lastFinalAt = 0;
+
   recognition.onresult = (e) => {
     let interim = '', final = '';
     for (let i = e.resultIndex; i < e.results.length; i++) {
       if (e.results[i].isFinal) {
+        if (i <= committedUpTo) continue;
+        committedUpTo = i;
+        const rawChunk = e.results[i][0].transcript.trim();
+        const now = Date.now();
+        if (rawChunk.toLowerCase() === lastFinalText && now - lastFinalAt < 3000) continue;
+        lastFinalText = rawChunk.toLowerCase();
+        lastFinalAt = now;
         let finalChunk = e.results[i][0].transcript;
         // Some platforms never populate confidence (comes back as exactly
         // 0 or undefined) - treat that as "unknown", not "low", so this
