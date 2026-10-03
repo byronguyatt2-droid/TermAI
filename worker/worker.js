@@ -1,10 +1,10 @@
 /**
- * KORVUS - Anthropic API Proxy + Stripe billing
+ * KORVUS - Anthropic API Proxy + Audio Transcription + Stripe billing
  * Cloudflare Worker deployed as `korva` (korva.byronguyatt2.workers.dev).
  * The API keys are stored as Cloudflare secrets and never exposed to the
  * browser or public repo. See worker/README.md for setup and deploy steps.
  *
- * CHANGES FROM PREVIOUS VERSION (v6 -> v7):
+ * CHANGES FROM PREVIOUS VERSION (v7 -> v8):
  * Adds the Stripe billing routes that index.html already calls (see the
  * BILLING / STRIPE section there), plus the webhook Stripe needs to keep
  * the `subscriptions` table in sync:
@@ -12,9 +12,7 @@
  *   POST /stripe/create-checkout-session - Stripe Checkout URL for a plan
  *   POST /stripe/create-portal-session   - Stripe Billing Portal URL
  *   POST /stripe/webhook                 - called by Stripe, not the app
- * Also adds POST /transcribe (speech-to-text on Workers AI, needs a
- * binding named `AI`) and raises MAX_TOKENS_CEILING from 3000 to 4096.
- * Every other path behaves exactly as v6 did (POST = AI proxy).
+ * Every other path behaves exactly as v7 did.
  *
  * NEW REQUIRED SECRETS for the /stripe/* routes:
  *   STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET,
@@ -23,6 +21,40 @@
  *
  * Talks to the Stripe REST API with plain fetch (no npm packages), so this
  * file can still be pasted straight into the Cloudflare dashboard editor.
+ *
+ * CHANGES FROM v6 -> v7:
+ * 1. BUG FIX, not just an addition: MAX_TOKENS_CEILING was 3000. The
+ *    client (index.html) was fixed this session to request max_tokens:
+ *    4096 for the main AI extraction call specifically because 3000 was
+ *    too low for a long, multi-section dictation and was causing the
+ *    Anthropic response to truncate mid-JSON (JSON.parse() then throwing
+ *    "Unexpected EOF", silently dropping the whole extraction into the
+ *    weaker offline fallback). But this Worker's
+ *    `Math.min(requested, MAX_TOKENS_CEILING)` clamp was still silently
+ *    pulling every request back down to 3000 regardless of what the
+ *    client asked for - so that client-side fix was NOT actually taking
+ *    effect against the real deployed Worker. Raised to 4096 to match.
+ * 2. NEW: a `/transcribe` endpoint for Korvus's experimental, opt-in,
+ *    higher-accuracy dictation path (see index.html's
+ *    startAudioCapture()/tryServerSideTranscription() - there's a
+ *    Settings toggle for it, off by default). Takes a multipart/form-data
+ *    upload (an `audio` file field, an optional `initial_prompt` text
+ *    field carrying Korvus's brand/species vocabulary for biasing), runs
+ *    it through Workers AI's whisper-large-v3-turbo model, and returns
+ *    { transcript }. Goes through the EXACT SAME CORS/Bearer-auth/plan-
+ *    and-usage gate as the existing Anthropic proxy below before this
+ *    endpoint is ever reached - nothing about this opens a new way in.
+ *    Every existing caller only ever POSTs to the bare origin (no path),
+ *    so routing by pathname is purely additive and changes nothing for
+ *    them.
+ * 3. NEW REQUIRED BINDING: this version needs a Workers AI binding named
+ *    `AI` on this Worker, in addition to the existing ANTHROPIC_API_KEY
+ *    and SUPABASE_SERVICE_ROLE_KEY secrets. Add it from the Cloudflare
+ *    dashboard: Workers & Pages -> this Worker -> Settings -> Bindings ->
+ *    Add -> "Workers AI" -> variable name `AI` -> Save/redeploy. (No new
+ *    secret value to generate or paste - Workers AI bindings don't need
+ *    an API key, just the binding itself.) Until that binding is added,
+ *    /transcribe responds 501 rather than crashing, and logs why.
  *
  * CHANGES FROM v5 -> v6:
  * Removed the temporary `?debugcheck` endpoint, and internal error detail
@@ -63,8 +95,13 @@ const DEFAULT_APP_URL = 'https://byronguyatt2-droid.github.io/';
 const ALLOWED_MODEL = 'claude-sonnet-5';
 
 // Hard ceiling on tokens generated per call, regardless of what the caller
-// requests. Matches the 4096 the app asks for on long dictations - at 3000
-// those JSON responses were being cut off mid-structure.
+// requests.
+// FIX (v7): was 3000. index.html's processTranscript() now requests 4096
+// (bumped there this session to stop long, multi-section dictations
+// truncating mid-JSON) - but this ceiling was silently clamping every
+// request back down to 3000 regardless, which meant that client-side fix
+// had no real effect against this deployed Worker. Raised to match, with
+// the same "real headroom, not just enough for today's case" reasoning.
 const MAX_TOKENS_CEILING = 4096;
 
 // Hard ceiling on characters of text accepted per call (summed across every
@@ -76,16 +113,12 @@ const MAX_INPUT_CHARS = 20000;
 // every image block in every message.
 const MAX_IMAGE_BASE64_CHARS = 8000000;
 
-// Speech-to-text model for /transcribe, run through the Workers AI binding
-// named `AI` (Settings > Bindings in the Cloudflare dashboard).
-const TRANSCRIBE_MODEL = '@cf/openai/whisper-large-v3-turbo';
-
-// Hard ceiling on uploaded audio per /transcribe call (a few minutes of
-// compressed dictation is well under this).
-const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
-
-// Hard ceiling on the vocabulary hint the app sends with each recording.
-const MAX_TRANSCRIBE_PROMPT_CHARS = 2000;
+// NEW (v7): hard ceiling on uploaded audio size for the /transcribe
+// endpoint. ~20MB is generous headroom for a long multi-minute field
+// recording at a reasonable compressed bitrate (a 10-minute AAC/Opus
+// recording is typically a few MB), while still bounding worst-case
+// memory/CPU and Workers AI cost per call.
+const MAX_AUDIO_BYTES = 20 * 1024 * 1024;
 
 // Monthly AI-call allowance per plan. Matches the tiers in the Korvus
 // Pricing Strategy doc (Starter/Pro/Business) plus a 'trial' tier for the
@@ -163,7 +196,7 @@ export default {
     }
 
     if (url.pathname === '/transcribe') {
-      return handleTranscribe(request, env, gate, origin);
+      return handleTranscribe(request, origin, gate, env);
     }
 
     let body;
@@ -654,61 +687,86 @@ function encodeStripeParams(params, prefix, out = new URLSearchParams()) {
 }
 
 // ── TRANSCRIBE ───────────────────────────────────────────────────────────
-// Takes the multipart upload from the app's tryServerSideTranscription()
-// (`audio` file + optional `initial_prompt` vocabulary hint) and returns
-// { transcript }. Counts against the plan's AI allowance like any other
-// AI call, and only when the model actually returned text.
 
-async function handleTranscribe(request, env, gate, origin) {
-  const reply = (status, payload) => jsonResponse(status, payload, origin);
-
+// NEW (v7): audio transcription endpoint for Korvus's experimental,
+// opt-in higher-accuracy dictation path. Only ever reached after the same
+// CORS/Bearer-auth/plan-gate checks in fetch() above have already passed
+// for this request - see the routing comment there. Uses Cloudflare's own
+// Workers AI Whisper model rather than a third-party API, so no new
+// secret/API key is needed, only the Workers AI binding described in the
+// version-history comment at the top of this file.
+async function handleTranscribe(request, origin, gate, env) {
   if (!env.AI) {
-    console.error('handleTranscribe: Workers AI binding `AI` is missing');
-    return reply(503, { message: 'Transcription is not configured' });
+    console.error('handleTranscribe: env.AI binding missing - add a Workers AI binding named "AI" to this Worker (Settings -> Bindings) and redeploy');
+    return new Response('Transcription is not configured on this server yet', { status: 501, headers: corsHeaders(origin) });
   }
 
   let form;
   try {
     form = await request.formData();
   } catch {
-    return reply(400, { message: 'Expected multipart form data' });
+    return new Response('Invalid request: expected multipart/form-data', { status: 400, headers: corsHeaders(origin) });
   }
 
-  const audio = form.get('audio');
-  if (!audio || typeof audio === 'string' || !audio.size) {
-    return reply(400, { message: 'Invalid request: audio file required' });
+  const audioFile = form.get('audio');
+  if (!audioFile || typeof audioFile.arrayBuffer !== 'function') {
+    return new Response('Invalid request: "audio" file is required', { status: 400, headers: corsHeaders(origin) });
   }
-  if (audio.size > MAX_AUDIO_BYTES) {
-    return reply(413, { message: 'Invalid request: audio exceeds size limit' });
-  }
-
-  const prompt = form.get('initial_prompt');
-  const input = { audio: bytesToBase64(new Uint8Array(await audio.arrayBuffer())), language: 'en' };
-  if (typeof prompt === 'string' && prompt.trim()) {
-    input.initial_prompt = prompt.slice(0, MAX_TRANSCRIBE_PROMPT_CHARS);
+  if (audioFile.size > MAX_AUDIO_BYTES) {
+    return new Response(`Invalid request: audio exceeds ${Math.floor(MAX_AUDIO_BYTES / 1_000_000)}MB limit`, { status: 413, headers: corsHeaders(origin) });
   }
 
-  let result;
+  // Optional - the client sends Korvus's brand/species vocabulary here to
+  // bias recognition (see buildTranscriptionVocabHint() in index.html).
+  // Capped defensively; this is a short hint, not arbitrary user text to
+  // forward to the model unchecked.
+  const initialPromptRaw = form.get('initial_prompt');
+  const initialPrompt = typeof initialPromptRaw === 'string' ? initialPromptRaw.slice(0, 1000) : undefined;
+
+  let aiResult;
   try {
-    result = await env.AI.run(TRANSCRIBE_MODEL, input);
+    const audioBuffer = await audioFile.arrayBuffer();
+    const base64Audio = arrayBufferToBase64(audioBuffer);
+    aiResult = await env.AI.run('@cf/openai/whisper-large-v3-turbo', {
+      audio: base64Audio,
+      task: 'transcribe',
+      language: 'en',
+      ...(initialPrompt ? { initial_prompt: initialPrompt } : {}),
+      vad_filter: true, // skip silent stretches - field recordings often have pauses between findings
+    });
   } catch (err) {
-    console.error('handleTranscribe: model call failed: ' + (err && err.message ? err.message : String(err)));
-    return reply(502, { message: 'Transcription failed' });
+    console.error('handleTranscribe: Workers AI call failed: ' + (err && err.message ? err.message : String(err)));
+    return new Response('Transcription failed', { status: 502, headers: corsHeaders(origin) });
   }
 
-  const transcript = result && typeof result.text === 'string' ? result.text.trim() : '';
-  if (!transcript) return reply(502, { message: 'Transcription returned no text' });
+  const transcript = aiResult && typeof aiResult.text === 'string' ? aiResult.text.trim() : '';
+  if (!transcript) {
+    return new Response('Transcription produced no text', { status: 502, headers: corsHeaders(origin) });
+  }
 
+  // Same usage metering as the Anthropic calls above - this is still an AI
+  // feature spending the business's monthly allowance, not a free side
+  // door around it.
   await recordUsage(gate.subscription, env);
-  return reply(200, { transcript });
+
+  return new Response(JSON.stringify({ transcript }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json', ...corsHeaders(origin) },
+  });
 }
 
-// btoa() only takes a binary string; build it in chunks so long recordings
-// don't overflow the argument limit of String.fromCharCode.
-function bytesToBase64(bytes) {
+// NEW (v7): converts an ArrayBuffer to a base64 string in fixed-size
+// chunks. String.fromCharCode.apply(null, hugeArray) throws once the
+// array gets into the tens of thousands of elements (a call-stack/
+// argument-count limit, not a Worker-specific issue), so pushing a
+// multi-MB recording through in one call would fail for exactly the
+// longer recordings this endpoint most needs to handle correctly.
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
   let binary = '';
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
   }
   return btoa(binary);
 }

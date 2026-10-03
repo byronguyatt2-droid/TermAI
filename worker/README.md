@@ -18,7 +18,7 @@ token cap is now 4096 (was 3000) to match what the app asks for. Everything
 else the Worker did before is unchanged.
 
 `/transcribe` needs a Workers AI binding named exactly `AI` (korva › Settings ›
-Bindings › Add › Workers AI). Without it the route answers 503 and the app
+Bindings › Add › Workers AI). Without it the route answers 501 and the app
 quietly keeps the on-device transcript.
 
 ## One-time Stripe setup
