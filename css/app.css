@@ -946,6 +946,12 @@ header {
   opacity: 0;
 }
 
+/* The job details body also wraps Account & Company, Team, Saved Reports,
+   Settings and Billing, which together run well past the 1000px cap above -
+   the cap was clipping the bottom of the menu (Billing's plans) so it
+   couldn't be scrolled to. No cap while it's open. */
+.job-panel:not(.collapsed) > #jobPanelBody { max-height: none; }
+
 .job-panel.collapsed .job-panel-summary,
 .saved-panel.collapsed .job-panel-summary { color: var(--text2); }
 
