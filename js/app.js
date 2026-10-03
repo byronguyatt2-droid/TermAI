@@ -2393,10 +2393,26 @@ function startRecording() {
   recognition.interimResults = true;
   recognition.lang = 'en-AU';
 
+  // Safari re-delivers results it has already finalised (the same index
+  // comes back as final again, or the same phrase arrives as a fresh final
+  // result a moment later), which doubled phrases like "Wall construction
+  // Wall construction". Commit each result index once, and drop a final
+  // chunk that exactly repeats the one just committed.
+  let committedUpTo = -1;
+  let lastFinalText = '';
+  let lastFinalAt = 0;
+
   recognition.onresult = (e) => {
     let interim = '', final = '';
     for (let i = e.resultIndex; i < e.results.length; i++) {
       if (e.results[i].isFinal) {
+        if (i <= committedUpTo) continue;
+        committedUpTo = i;
+        const rawChunk = e.results[i][0].transcript.trim();
+        const now = Date.now();
+        if (rawChunk.toLowerCase() === lastFinalText && now - lastFinalAt < 3000) continue;
+        lastFinalText = rawChunk.toLowerCase();
+        lastFinalAt = now;
         let finalChunk = e.results[i][0].transcript;
         // Some platforms never populate confidence (comes back as exactly
         // 0 or undefined) - treat that as "unknown", not "low", so this
@@ -2460,21 +2476,43 @@ function startRecording() {
   startAudioCapture();
 }
 
+// Resolves once recognition has delivered its last result. Web Speech
+// sends the final phrase in onresult AFTER stop(), so anything that reads
+// currentTranscript right after stopping misses it. Falls back after 2s in
+// case onend never fires (e.g. stop() after an error already ended it).
+function waitForRecognitionEnd(rec) {
+  if (!rec) return Promise.resolve();
+  return new Promise(resolve => {
+    const timer = setTimeout(resolve, 2000);
+    rec.onend = () => { clearTimeout(timer); resolve(); };
+  });
+}
+
 function stopRecording() {
+  const recognitionEnded = waitForRecognitionEnd(recognition);
   if (recognition) recognition.stop();
   isRecording = false;
   document.getElementById('voiceBtn').classList.remove('recording');
   document.getElementById('voiceBtnText').textContent = 'Tap to Speak';
   document.getElementById('waveform').classList.remove('show');
   if (currentTranscript.trim()) document.getElementById('extractBtn').disabled = false;
+  recognitionEnded.then(() => {
+    if (!isRecording && currentTranscript.trim()) document.getElementById('extractBtn').disabled = false;
+  });
 
   // EXPERIMENTAL, opt-in — everything above this point has already
   // completed exactly as it always has, regardless of what happens below.
   // This resolves in the background and, on a clean result, offers it as a
   // suggestion (see tryServerSideTranscription). Any failure is silent.
+  // The snapshot that showServerTranscriptionSuggestion() compares against
+  // is taken only after the last phrase has landed - taken earlier, that
+  // late phrase made the transcript "changed" and the suggestion was
+  // silently dropped.
   if (audioCaptureEnabled && !audioCaptureFailedThisSession) {
-    serverTranscriptOriginalText = currentTranscript;
-    stopAudioCapture().then(blob => tryServerSideTranscription(blob));
+    Promise.all([stopAudioCapture(), recognitionEnded]).then(([blob]) => {
+      serverTranscriptOriginalText = currentTranscript;
+      tryServerSideTranscription(blob);
+    });
   } else {
     stopAudioCaptureTracks();
   }
