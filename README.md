@@ -4,7 +4,9 @@ A voice-to-report progressive web app / iOS app for licensed Australian timber p
 
 This repository hosts the web build (served via GitHub Pages) that also forms the basis of the native iOS app, built with Capacitor.
 
-- `index.html` — the app itself
+- `index.html` — the app's markup
+- `css/app.css` — the app's styles
+- `js/app.js` — the app's logic (a plain script, no build step)
 - `privacy.html` — Privacy Policy (draft, not yet legally reviewed)
 - `terms.html` — Terms of Service (draft, not yet legally reviewed)
 - `manifest.json`, `service-worker.js`, `icon-*.png` — PWA support files
