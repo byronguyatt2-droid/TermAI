@@ -11,9 +11,15 @@ calls:
 | `POST /stripe/create-checkout-session` | Upgrade buttons | Returns a Stripe Checkout link for `starter`, `pro` or `business` |
 | `POST /stripe/create-portal-session` | Manage button | Returns a Stripe Billing Portal link (change plan, card, cancel) |
 | `POST /stripe/webhook` | Stripe | Updates the `subscriptions` row when someone pays, changes plan or cancels |
+| `POST /transcribe` | Experimental AI audio transcription | Runs the recording through Whisper on Workers AI and returns `{ transcript }`; counts as one AI call |
 
-Only the business owner can start checkout or open the portal. Everything else
-the Worker did before is unchanged.
+Only the business owner can start checkout or open the portal. The AI proxy's
+token cap is now 4096 (was 3000) to match what the app asks for. Everything
+else the Worker did before is unchanged.
+
+`/transcribe` needs a Workers AI binding named exactly `AI` (korva › Settings ›
+Bindings › Add › Workers AI). Without it the route answers 503 and the app
+quietly keeps the on-device transcript.
 
 ## One-time Stripe setup
 

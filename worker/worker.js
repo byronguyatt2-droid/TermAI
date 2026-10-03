@@ -12,6 +12,8 @@
  *   POST /stripe/create-checkout-session - Stripe Checkout URL for a plan
  *   POST /stripe/create-portal-session   - Stripe Billing Portal URL
  *   POST /stripe/webhook                 - called by Stripe, not the app
+ * Also adds POST /transcribe (speech-to-text on Workers AI, needs a
+ * binding named `AI`) and raises MAX_TOKENS_CEILING from 3000 to 4096.
  * Every other path behaves exactly as v6 did (POST = AI proxy).
  *
  * NEW REQUIRED SECRETS for the /stripe/* routes:
@@ -73,6 +75,17 @@ const MAX_INPUT_CHARS = 20000;
 // Hard ceiling on total base64 image data accepted per call, summed across
 // every image block in every message.
 const MAX_IMAGE_BASE64_CHARS = 8000000;
+
+// Speech-to-text model for /transcribe, run through the Workers AI binding
+// named `AI` (Settings > Bindings in the Cloudflare dashboard).
+const TRANSCRIBE_MODEL = '@cf/openai/whisper-large-v3-turbo';
+
+// Hard ceiling on uploaded audio per /transcribe call (a few minutes of
+// compressed dictation is well under this).
+const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
+
+// Hard ceiling on the vocabulary hint the app sends with each recording.
+const MAX_TRANSCRIBE_PROMPT_CHARS = 2000;
 
 // Monthly AI-call allowance per plan. Matches the tiers in the Korvus
 // Pricing Strategy doc (Starter/Pro/Business) plus a 'trial' tier for the
@@ -143,10 +156,14 @@ export default {
     }
 
     // Plan/subscription gate. Runs after identity is confirmed, before we
-    // spend anything calling Anthropic.
+    // spend anything calling Anthropic or Workers AI.
     const gate = await checkPlanAndUsage(verifiedUser.id, env);
     if (!gate.allowed) {
       return new Response(gate.message, { status: gate.status, headers: corsHeaders(origin) });
+    }
+
+    if (url.pathname === '/transcribe') {
+      return handleTranscribe(request, env, gate, origin);
     }
 
     let body;
@@ -634,6 +651,66 @@ function encodeStripeParams(params, prefix, out = new URLSearchParams()) {
     else out.append(name, String(value));
   }
   return out;
+}
+
+// ── TRANSCRIBE ───────────────────────────────────────────────────────────
+// Takes the multipart upload from the app's tryServerSideTranscription()
+// (`audio` file + optional `initial_prompt` vocabulary hint) and returns
+// { transcript }. Counts against the plan's AI allowance like any other
+// AI call, and only when the model actually returned text.
+
+async function handleTranscribe(request, env, gate, origin) {
+  const reply = (status, payload) => jsonResponse(status, payload, origin);
+
+  if (!env.AI) {
+    console.error('handleTranscribe: Workers AI binding `AI` is missing');
+    return reply(503, { message: 'Transcription is not configured' });
+  }
+
+  let form;
+  try {
+    form = await request.formData();
+  } catch {
+    return reply(400, { message: 'Expected multipart form data' });
+  }
+
+  const audio = form.get('audio');
+  if (!audio || typeof audio === 'string' || !audio.size) {
+    return reply(400, { message: 'Invalid request: audio file required' });
+  }
+  if (audio.size > MAX_AUDIO_BYTES) {
+    return reply(413, { message: 'Invalid request: audio exceeds size limit' });
+  }
+
+  const prompt = form.get('initial_prompt');
+  const input = { audio: bytesToBase64(new Uint8Array(await audio.arrayBuffer())), language: 'en' };
+  if (typeof prompt === 'string' && prompt.trim()) {
+    input.initial_prompt = prompt.slice(0, MAX_TRANSCRIBE_PROMPT_CHARS);
+  }
+
+  let result;
+  try {
+    result = await env.AI.run(TRANSCRIBE_MODEL, input);
+  } catch (err) {
+    console.error('handleTranscribe: model call failed: ' + (err && err.message ? err.message : String(err)));
+    return reply(502, { message: 'Transcription failed' });
+  }
+
+  const transcript = result && typeof result.text === 'string' ? result.text.trim() : '';
+  if (!transcript) return reply(502, { message: 'Transcription returned no text' });
+
+  await recordUsage(gate.subscription, env);
+  return reply(200, { transcript });
+}
+
+// btoa() only takes a binary string; build it in chunks so long recordings
+// don't overflow the argument limit of String.fromCharCode.
+function bytesToBase64(bytes) {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
 }
 
 // ── HELPERS ──────────────────────────────────────────────────────────────
