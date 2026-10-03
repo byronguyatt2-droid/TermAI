@@ -4,7 +4,7 @@
 // recommendations into an editable treatment quote, and exports it as a PDF in
 // the same visual style as the inspection report.
 //
-// Loaded after the main <script> in index.html and relies on its globals:
+// Loaded after js/app.js and relies on its globals:
 // appInitialised, currentReportId, authUser, authBusiness, DRAFT_KEY,
 // flushDraftSave, getSavedReports, getCompanyDetails, formatAddress, jsPDF,
 // ensureJsPDFLoaded, PDF_COLORS, drawPdfCompanyMark, deliverPdfBlob,

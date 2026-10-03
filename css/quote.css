@@ -1,6 +1,6 @@
 /* ── QUOTE SCREEN ──────────────────────────────────────────────────────────
    Full-screen sibling of #mainMenu and #app. Builds a treatment quote from an
-   inspection report; see js/quote.js. Uses the design tokens in index.html. */
+   inspection report; see js/quote.js. Uses the design tokens in css/app.css. */
 
 #quoteScreen {
   display: none;
