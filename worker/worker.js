@@ -61,8 +61,9 @@ const DEFAULT_APP_URL = 'https://byronguyatt2-droid.github.io/';
 const ALLOWED_MODEL = 'claude-sonnet-5';
 
 // Hard ceiling on tokens generated per call, regardless of what the caller
-// requests.
-const MAX_TOKENS_CEILING = 3000;
+// requests. Matches the 4096 the app asks for on long dictations - at 3000
+// those JSON responses were being cut off mid-structure.
+const MAX_TOKENS_CEILING = 4096;
 
 // Hard ceiling on characters of text accepted per call (summed across every
 // text block in every message, whether content is a plain string or an
